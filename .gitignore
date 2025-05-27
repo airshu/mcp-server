@@ -1,0 +1,15 @@
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+output/
+
+*.iml
+*.ipr
+*.iws
+.idea/

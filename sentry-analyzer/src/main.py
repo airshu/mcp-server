@@ -1,16 +1,13 @@
-#!/usr/bin/env python3
 import asyncio
 from dataclasses import dataclass
 from typing import List, Dict
 import click
 import httpx
 import mcp.types as types
-from mcp.server import NotificationOptions, Server
-from mcp.server.models import InitializationOptions
+from mcp.server.lowlevel import Server
 from mcp.shared.exceptions import McpError
-import mcp.server.stdio
 
-SENTRY_API_BASE = "https://sentry.your-domain.com/api/0/"
+SENTRY_API_BASE = "https://sentry.xiaopeng.com/api/0/"
 
 @dataclass
 class SentryIssueData:
@@ -39,7 +36,6 @@ Event Count: {self.count}
     def to_tool_result(self) -> List[types.TextContent]:
         return [types.TextContent(type="text", text=self.to_text())]
 
-
 @dataclass
 class ProjectListData:
     projects: List[Dict]
@@ -53,12 +49,11 @@ class ProjectListData:
             result += f"   平台: {', '.join(project.get('platforms', ['未知']))}\n"
             result += f"   团队: {project.get('team', {}).get('name', '未分配')}\n"
             result += f"   最后更新: {project.get('dateCreated', '未知')}\n"
-            result += f"   URL: https://sentry.your-domain.com/organizations/sentry/projects/{project['slug']}/\n\n"
+            result += f"   URL: https://sentry.xiaopeng.com/organizations/sentry/projects/{project['slug']}/\n\n"
         return result
 
     def to_tool_result(self) -> List[types.TextContent]:
         return [types.TextContent(type="text", text=self.to_text())]
-
 
 @dataclass
 class TopIssueData:
@@ -134,14 +129,14 @@ async def handle_sentry_issue(
     """处理单个Sentry问题"""
     try:
         issue_id = extract_issue_id(issue_id_or_url)
-        
+
         # 获取问题详情
         response = await http_client.get(
             f"issues/{issue_id}/",
             headers={"Authorization": f"Bearer {auth_token}"}
         )
         if response.status_code == 401:
-            raise McpError("Error: Unauthorized. Please check your authentication token.")
+            raise McpError(types.ErrorData(code=401, message="Error: Unauthorized. Please check your authentication token."))
         response.raise_for_status()
         issue_data = response.json()
 
@@ -167,11 +162,11 @@ async def handle_sentry_issue(
         )
 
     except SentryError as e:
-        raise McpError(str(e))
+        raise McpError(types.ErrorData(code=types.INVALID_PARAMS, message=str(e)))
     except httpx.HTTPStatusError as e:
-        raise McpError(f"Error fetching Sentry issue: {str(e)}")
+        raise McpError(types.ErrorData(code=e.response.status_code, message=f"Error fetching Sentry issue: {str(e)}"))
     except Exception as e:
-        raise McpError(f"An error occurred: {str(e)}")
+        raise McpError(types.ErrorData(code=types.INTERNAL_ERROR, message=f"An error occurred: {str(e)}"))
 
 async def handle_top_issues(
     http_client: httpx.AsyncClient, auth_token: str, org_slug: str, project_id: str, limit: int = 10
@@ -188,9 +183,9 @@ async def handle_top_issues(
             headers={"Authorization": f"Bearer {auth_token}"}
         )
         if response.status_code == 401:
-            raise McpError("Error: Unauthorized. Please check your authentication token.")
+            raise McpError(types.ErrorData(code=401, message="Error: Unauthorized. Please check your authentication token."))
         response.raise_for_status()
-        
+
         # 获取响应数据并打印详细结构
         issues = response.json()
         print("First issue structure:", issues[0] if issues else "No issues found")
@@ -200,14 +195,13 @@ async def handle_top_issues(
             issue_dict = dict(issue)  # 保留原始数据
             issue_dict['url'] = f"https://sentry.xiaopeng.com/organizations/sentry/issues/{issue['id']}/"  # 添加URL字段
             processed_issues.append(issue_dict)
-        
+
         return TopIssueData(issues=processed_issues)
 
     except httpx.HTTPStatusError as e:
-        raise McpError(f"Error fetching top issues: {str(e)}")
+        raise McpError(types.ErrorData(code=e.response.status_code, message=f"Error fetching top issues: {str(e)}"))
     except Exception as e:
-        raise McpError(f"An error occurred: {str(e)}")
-    
+        raise McpError(types.ErrorData(code=types.INTERNAL_ERROR, message=f"An error occurred: {str(e)}"))
 
 async def handle_list_projects(http_client: httpx.AsyncClient, auth_token: str, org_slug: str) -> ProjectListData:
     """获取所有项目列表"""
@@ -221,23 +215,23 @@ async def handle_list_projects(http_client: httpx.AsyncClient, auth_token: str, 
         print("Response content:", response.content)
 
         if response.status_code == 401:
-            raise McpError("Error: Unauthorized. Please check your authentication token.")
+            raise McpError(types.ErrorData(code=401, message="Error: Unauthorized. Please check your authentication token."))
         response.raise_for_status()
-        
+
         projects = response.json()
         return ProjectListData(projects=projects)
 
     except httpx.HTTPStatusError as e:
-        raise McpError(f"Error fetching projects list: {str(e)}")
+        raise McpError(types.ErrorData(code=e.response.status_code, message=f"Error fetching projects list: {str(e)}"))
     except Exception as e:
-        raise McpError(f"An error occurred: {str(e)}")
+        raise McpError(types.ErrorData(code=types.INTERNAL_ERROR, message=f"An error occurred: {str(e)}"))
 
-async def serve(auth_token: str, org_slug: str) -> Server:
+def create_server(auth_token: str, org_slug: str) -> Server:
     """创建并配置MCP服务器"""
-    server = Server("sentry-analyzer")
-    http_client = httpx.AsyncClient(base_url=SENTRY_API_BASE)
+    app = Server("sentry-analyzer")  # Match the server name in MCP settings
+    http_client = httpx.AsyncClient(base_url=SENTRY_API_BASE, timeout=30.0)
 
-    @server.list_tools()
+    @app.list_tools()
     async def handle_list_tools() -> List[types.Tool]:
         return [
             types.Tool(
@@ -292,32 +286,39 @@ async def serve(auth_token: str, org_slug: str) -> Server:
             )
         ]
 
-    @server.call_tool()
+    @app.call_tool()
     async def handle_call_tool(
         name: str, arguments: Dict | None
     ) -> List[types.TextContent]:
-        # if not arguments:
-        #     raise ValueError("Missing arguments")
-
         if name == "get_top_issues":
+            if not arguments:
+                raise McpError(types.ErrorData(code=types.INVALID_PARAMS, message="Missing arguments"))
             project_id = arguments.get("project_id")
             if not project_id:
-                raise ValueError("Missing project_id argument")
+                raise McpError(types.ErrorData(code=types.INVALID_PARAMS, message="Missing project_id argument"))
             limit = int(arguments.get("limit", 10))
-            result = await handle_top_issues(http_client, auth_token, org_slug, project_id, limit)
-            return result.to_tool_result()
+            try:
+                print(f"Getting top issues for project {project_id}")
+                result = await handle_top_issues(http_client, auth_token, org_slug, project_id, limit)
+                print("Successfully retrieved top issues")
+                return result.to_tool_result()
+            except Exception as e:
+                print(f"Error in get_top_issues: {str(e)}")
+                raise
 
         elif name == "analyze_issue":
+            if not arguments:
+                raise McpError(types.ErrorData(code=types.INVALID_PARAMS, message="Missing arguments"))
             issue_url = arguments.get("issue_url")
             if not issue_url:
-                raise ValueError("Missing issue_url argument")
+                raise McpError(types.ErrorData(code=types.INVALID_PARAMS, message="Missing issue_url argument"))
             result = await handle_sentry_issue(http_client, auth_token, org_slug, issue_url)
             return result.to_tool_result()
 
         elif name == "list_projects":
             result = await handle_list_projects(http_client, auth_token, org_slug)
             return result.to_tool_result()
-        
+
         elif name == "list_organizations":
             # 处理组织列表的逻辑
             response = await http_client.get(
@@ -325,16 +326,16 @@ async def serve(auth_token: str, org_slug: str) -> Server:
                 headers={"Authorization": f"Bearer {auth_token}"}
             )
             if response.status_code == 401:
-                raise McpError("Error: Unauthorized. Please check your authentication token.")
+                raise McpError(types.ErrorData(code=401, message="Error: Unauthorized. Please check your authentication token."))
             response.raise_for_status()
             organizations = response.json()
             org_list = [org["slug"] for org in organizations]
             return [types.TextContent(type="text", text="\n".join(org_list))]
 
         else:
-            raise ValueError(f"Unknown tool: {name}")
+            raise McpError(types.ErrorData(code=types.METHOD_NOT_FOUND, message=f"Unknown tool: {name}"))
 
-    return server
+    return app
 
 @click.command()
 @click.option(
@@ -355,26 +356,69 @@ async def serve(auth_token: str, org_slug: str) -> Server:
     required=False,
     help="Sentry project ID"
 )
-def main(auth_token: str, org: str, project_id: str):
+@click.option(
+    "--port",
+    envvar="PORT",
+    default=8011,
+    help="服务器端口号"
+)
+@click.option(
+    "--transport",
+    type=click.Choice(["stdio", "sse"]),
+    default="stdio",
+    help="Transport type",
+)
+def main(auth_token: str, org: str, project_id: str | None, port: int, transport: str) -> None:
     """启动MCP服务器"""
-    async def _run():
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            server = await serve(auth_token, org)
-            await server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="sentry-analyzer",
-                    server_version="0.1.0",
-                    capabilities=server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
-                    ),
-                ),
-            )
+    print("Server starting...")
+    print(f"Transport mode: {transport}")
 
-    asyncio.run(_run())
+    if transport == "sse":
+        from mcp.server.sse import SseServerTransport
+        from starlette.applications import Starlette
+        from starlette.routing import Route, Mount
+        import uvicorn
 
-if __name__ == "__main__":
-    main()
+        app = create_server(auth_token, org)
+        print("Created server with name:", app.name)
+
+        sse = SseServerTransport("/messages/")
+
+        async def handle_sse(request):
+            print("Handling SSE request...")
+            async with sse.connect_sse(
+                request.scope, request.receive, request._send
+            ) as streams:
+                try:
+                    print("Running server...")
+                    init_options = app.create_initialization_options()
+                    print("Init options:", init_options)
+                    await app.run(streams[0], streams[1], init_options)
+                except Exception as e:
+                    print("Error in handle_sse:", e)
+                    import traceback
+                    traceback.print_exc()
+                    raise
+
+        starlette_app = Starlette(
+            debug=True,
+            routes=[
+                Route("/sse", endpoint=handle_sse),
+                Mount("/messages/", app=sse.handle_post_message),
+            ],
+        )
+
+        print("Starting uvicorn...")
+        uvicorn.run(starlette_app, host="127.0.0.1", port=port)
+    else:
+        from mcp.server.stdio import stdio_server
+
+        async def arun():
+            async with stdio_server() as streams:
+                server = create_server(auth_token, org)
+                await server.run(
+                    streams[0], streams[1], server.create_initialization_options()
+                )
+
+        asyncio.run(arun())
 
