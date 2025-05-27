@@ -7,7 +7,7 @@ import mcp.types as types
 from mcp.server.lowlevel import Server
 from mcp.shared.exceptions import McpError
 
-SENTRY_API_BASE = "https://sentry.xiaopeng.com/api/0/"
+SENTRY_API_BASE = "https://sentry.domain.com/api/0/"
 
 @dataclass
 class SentryIssueData:
@@ -49,7 +49,7 @@ class ProjectListData:
             result += f"   平台: {', '.join(project.get('platforms', ['未知']))}\n"
             result += f"   团队: {project.get('team', {}).get('name', '未分配')}\n"
             result += f"   最后更新: {project.get('dateCreated', '未知')}\n"
-            result += f"   URL: https://sentry.xiaopeng.com/organizations/sentry/projects/{project['slug']}/\n\n"
+            result += f"   URL: https://sentry.domain.com/organizations/sentry/projects/{project['slug']}/\n\n"
         return result
 
     def to_tool_result(self) -> List[types.TextContent]:
@@ -193,7 +193,7 @@ async def handle_top_issues(
         processed_issues = []
         for issue in issues:
             issue_dict = dict(issue)  # 保留原始数据
-            issue_dict['url'] = f"https://sentry.xiaopeng.com/organizations/sentry/issues/{issue['id']}/"  # 添加URL字段
+            issue_dict['url'] = f"https://sentry.domain.com/organizations/sentry/issues/{issue['id']}/"  # 添加URL字段
             processed_issues.append(issue_dict)
 
         return TopIssueData(issues=processed_issues)
