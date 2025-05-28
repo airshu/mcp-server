@@ -1,5 +1,6 @@
 import anyio
 import click
+from typing import Optional, List
 import mcp.types as types
 import os
 import re
@@ -70,23 +71,51 @@ async def extract_file_info(file_content: str) -> dict:
         'methods': [],
         'imports': []
     }
-    
+
     # 提取导入语句
     import_pattern = r'import\s+[\'"]([^\'"]+)[\'"];'
     imports = re.findall(import_pattern, file_content)
     info['imports'] = imports
-    
+
     # 提取类名
-    class_pattern = r'class\s+(\w+)'
+    class_pattern = r'class\s+(\w+)(?:\s+extends|\s+implements|\s+with|\s*{)'
     class_matches = re.findall(class_pattern, file_content)
     if class_matches:
         info['class_name'] = class_matches[0]
-    
-    # 提取方法名和签名
-    method_pattern = r'(?:@\w+\s+)*(?:Future<\w+>\s+)?(\w+)\s*\([^)]*\)\s*(?:async\s*)?{'
-    methods = re.findall(method_pattern, file_content)
-    info['methods'] = [m for m in methods if not m.startswith('_')]
-    
+
+    # 排除的关键字列表 - 这些不是方法名
+    exclude_keywords = ['if', 'else', 'for', 'while', 'switch', 'case', 'return', 'break', 'continue']
+
+    # 改进的方法提取 - 使用多个正则表达式捕获不同类型的方法
+    methods = []
+
+    # 1. 常规方法 (各种返回类型) - 添加了方法体开始的 { 确保匹配到完整方法
+    regular_method = r'(?:@\w+\s+)*(?:static\s+)?(?:void|String|int|bool|double|num|Future|List|Map|Set|Stream|\w+)(?:<[^>]+>)?\s+(\w+)\s*\([^)]*\)\s*(?:async\s*)?{'
+    methods.extend([m for m in re.findall(regular_method, file_content) if not m.startswith('_')])
+
+    # 2. 构造函数
+    if info['class_name']:
+        constructor_pattern = r'(?:@\w+\s+)*(?:const\s+)?(?:factory\s+)?(' + re.escape(info['class_name']) + r'(?:\.\w+)?)\s*\([^)]*\)\s*(?::\s*[\w\s(),]+)?\s*{'
+        methods.extend(re.findall(constructor_pattern, file_content))
+
+    # 3. Getter/Setter - 也添加了方法体识别
+    getter_pattern = r'(?:@\w+\s+)*(?:static\s+)?(?:\w+(?:<[^>]+>)?)\s+get\s+(\w+)\s*(?:=>|{)'
+    setter_pattern = r'(?:@\w+\s+)*(?:static\s+)?set\s+(\w+)\s*\([^)]*\)\s*{'
+    methods.extend([m for m in re.findall(getter_pattern, file_content) if not m.startswith('_')])
+    methods.extend([m for m in re.findall(setter_pattern, file_content) if not m.startswith('_')])
+
+    # 4. 操作符重载
+    operator_pattern = r'(?:@\w+\s+)*(?:\w+(?:<[^>]+>)?)\s+operator\s+(\S+)\s*\([^)]*\)\s*{'
+    operators = re.findall(operator_pattern, file_content)
+    if operators:
+        methods.extend([f"operator {op}" for op in operators])
+
+    # 过滤掉控制流关键字等非方法名
+    methods = [m for m in methods if m not in exclude_keywords]
+
+    # 去除重复
+    info['methods'] = list(set(methods))
+
     # 提取依赖
     dependencies = []
     for imp in imports:
@@ -101,25 +130,35 @@ async def extract_file_info(file_content: str) -> dict:
 # path: str 要是用绝对路径
 async def generate_unit_test(
     path: str,
+    content: Optional[str] = None,
 ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-    """根据文件路径生成单元测试代码"""
+    """根据文件路径或内容生成单元测试代码
+
+    Args:
+        path: 文件路径，如果不提供content则从此路径读取文件内容
+        content: 可选，直接提供的文件内容，优先级高于path
+    """
     try:
-        # 转换为绝对路径
-        abs_path = os.path.abspath(path)
-        if not os.path.exists(abs_path):
-            # 如果文件不存在，尝试从当前工作目录解析路径
-            abs_path = os.path.abspath(os.path.join(os.getcwd(), path))
+        file_content = content
+
+        # 如果没有提供内容，则尝试从路径读取
+        if file_content is None:
+            # 转换为绝对路径
+            abs_path = os.path.abspath(path)
             if not os.path.exists(abs_path):
-                raise FileNotFoundError(f"File not found: {path}")
-        
-        # 读取文件内容
-        with open(abs_path, 'r') as file:
-            content = file.read()
-            
+                # 如果文件不存在，尝试从当前工作目录解析路径
+                abs_path = os.path.abspath(os.path.join(os.getcwd(), path))
+                if not os.path.exists(abs_path):
+                    raise FileNotFoundError(f"File not found: {path}")
+
+            # 读取文件内容
+            with open(abs_path, 'r') as file:
+                file_content = file.read()
+
         # 提取文件信息
-        info = await extract_file_info(content)
+        info = await extract_file_info(file_content)
         file_name = os.path.basename(path)
-        
+
         # 准备其他信息字符串
         other_info = f"Methods: {', '.join(info['methods'])}\n"
         other_info += f"Imports: {', '.join(info['imports'])}"
@@ -135,6 +174,7 @@ async def generate_unit_test(
         return [types.TextContent(type="text", text=prompt)]
     except Exception as e:
         return [types.TextContent(type="text", text=f"Error generating unit test: {str(e)}")]
+
 
 @click.command()
 @click.option("--port", default=8010, help="Port to listen on for SSE")
@@ -153,9 +193,12 @@ def main(port: int, transport: str) -> int:
     ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
         if name != "generateUnitTest":
             raise ValueError(f"Unknown tool: {name}")
-        if "path" not in arguments:
-            raise ValueError("Missing required argument 'path'")
-        return await generate_unit_test(arguments["path"])
+
+        path = arguments.get("path", "")
+        if not path and "content" not in arguments:
+          raise ValueError("Missing required argument 'path' or 'content'")
+        content = arguments.get("content", None)
+        return await generate_unit_test(path, content=content)
 
     @app.list_tools()
     async def list_tools() -> list[types.Tool]:
@@ -165,12 +208,16 @@ def main(port: int, transport: str) -> int:
                 description="根据提示词，生成 Flutter 单元测试代码",
                 inputSchema={
                     "type": "object",
-                    "required": ["path"],
+                    "required": [],
                     "properties": {
                         "path": {
                             "type": "string",
                             "description": "代码路径",
-                        }
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "代码内容，如果提供了此参数，则path参数将被忽略",
+                        },
                     },
                 },
             )
